@@ -3,7 +3,7 @@ from openai import OpenAI
 from gtts import gTTS
 from pptx import Presentation
 from pptx.util import Inches, Pt
-from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
 from pdf2image import convert_from_path
 from pydantic import BaseModel, ValidationError
 import subprocess
@@ -21,6 +21,7 @@ client = OpenAI(
     base_url=os.getenv("ENDPOINT"),
     api_key=os.getenv("TOKEN"),
 )
+
 
 # Data models
 class SlideItem(BaseModel):
@@ -82,7 +83,7 @@ def chunk_text(text, chunk_size=100000):
     return chunks
 
 def generate_chunk_content(chunks, config):
-    print("Summarizing chunks with OpenAI...")
+    print("Summarizing chunks with Mistral...")
     combined_content = "\n\n".join(chunks)
 
     theme_desc = {
@@ -113,10 +114,9 @@ def generate_chunk_content(chunks, config):
     )
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="mistral-medium",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
-        max_tokens=16000
     ).choices[0].message.content.strip()
 
     # Clean up response to get valid JSON
@@ -128,12 +128,29 @@ def generate_chunk_content(chunks, config):
     try:
         parsed_response = json.loads(response)
 
-        # Fix: If voice_over_script is a list, join it into a single string
+        # ✅ Join voice_over_script if it is a list
         if isinstance(parsed_response.get('voice_over_script'), list):
             parsed_response['voice_over_script'] = "\n\n".join(parsed_response['voice_over_script'])
 
+        # ✅ Convert complex duration strings into float seconds
+        import re
+        def parse_duration_to_seconds(text):
+            if isinstance(text, (int, float)):
+                return float(text)
+            if isinstance(text, str):
+                match = re.match(r"(?:(\d+)\s*minutes?)?\s*(?:(\d+)\s*seconds?)?", text.lower())
+                if match:
+                    minutes = int(match.group(1)) if match.group(1) else 0
+                    seconds = int(match.group(2)) if match.group(2) else 0
+                    return float(minutes * 60 + seconds)
+            return 60.0  # default fallback
+
+        for seg in parsed_response.get("short_segments", []):
+            seg["duration"] = parse_duration_to_seconds(seg.get("duration"))
+
         validated_chunk = SlideChunk(**parsed_response)
         print(validated_chunk)
+
     except (json.JSONDecodeError, ValidationError) as e:
         print(f"Parsing error: {e}\nResponse was: {response}")
         raise
@@ -143,8 +160,9 @@ def generate_chunk_content(chunks, config):
 
 # Step 3: Generate Audio from Script
 def generate_audio(script, output_file):
-    tts = gTTS(script)
+    tts = gTTS(script, lang="fr")
     tts.save(output_file)
+
 
 def generate_presentation(slide_contents, pptx_path, config=None):
     """
@@ -308,10 +326,13 @@ def generate_presentation(slide_contents, pptx_path, config=None):
 
 # Step 5: Convert Slides to Images
 def slides_to_images(ppt_path, output_folder):
+    libreoffice_path = r"C:\Program Files\LibreOffice\program\soffice.exe"  # <- Changez ici si votre installation est ailleurs
     subprocess.run([
-        '/Applications/LibreOffice.app/Contents/MacOS/soffice', '--headless', '--convert-to', 'pdf', ppt_path, '--outdir', output_folder
+        libreoffice_path, '--headless', '--convert-to', 'pdf', ppt_path, '--outdir', output_folder
     ], check=True)
+
     pdf_path = os.path.join(output_folder, os.path.splitext(os.path.basename(ppt_path))[0] + ".pdf")
+
     return [img.save(os.path.join(output_folder, f"slide_{i}.png"), 'PNG') or os.path.join(output_folder, f"slide_{i}.png")
             for i, img in enumerate(convert_from_path(pdf_path, dpi=200))]
 
@@ -320,8 +341,8 @@ def slides_to_images(ppt_path, output_folder):
 def create_video(slide_imgs, audio_path, output_path):
     audio = AudioFileClip(audio_path)
     duration = audio.duration / len(slide_imgs)
-    clips = [ImageClip(p).set_duration(duration) for p in slide_imgs]
-    video = concatenate_videoclips(clips, method="compose").set_audio(audio)
+    clips = [ImageClip(p).with_duration(duration) for p in slide_imgs]
+    video = concatenate_videoclips(clips, method="compose").with_audio(audio)
     video.write_videofile(output_path, fps=24)
 
 # Main
@@ -369,4 +390,4 @@ def main(pdf_path):
         print("✅ Video exported")
 
 if __name__ == "__main__":
-    main("./contents/Promises_in_JavaScript_Notes.pdf")
+    main("./contents/TW-Formation Métiers (1).pdf")
